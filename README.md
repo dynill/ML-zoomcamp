@@ -1,3 +1,3 @@
-# ML-zoomcamp-homework
+# ML-zoomcamp
 
-Do your homework!
+Do your projects!
