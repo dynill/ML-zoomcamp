@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mega-hit-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mega-hit
+  template:
+    metadata:
+      labels:
+        app: mega-hit
+    spec:
+      containers:
+      - name: mega-hit-pod
+        image: mega-hit-prediction:v001
+        resources:
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        ports:
+        - containerPort: 9696
