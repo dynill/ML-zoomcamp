@@ -1,6 +1,6 @@
 # Mega-Hit Prediction: What Makes a Song a Streaming Mega-Hit?
 
-A machine learning midterm project that predicts whether a song is a **mega-hit**, meaning it sits in the top 25% by stream count among the most streamed Spotify songs of 2023. The model is served as a web service (Flask + gunicorn) inside a Docker container.
+A machine learning midterm project that predicts whether a song is a **mega-hit**, meaning it sits in the top 25% by stream count among the most streamed Spotify songs of 2023. The model is served as a web service (Flask + gunicorn) in Docker and on a local Kubernetes cluster.
 
 **Headline finding:** the final model reaches a test ROC AUC of **0.89**, but almost all of that comes from the song's **release year**. Using only musical characteristics, every model performs no better than chance.
 
@@ -12,7 +12,7 @@ A machine learning midterm project that predicts whether a song is a **mega-hit*
 5. [Project structure](#5-project-structure)
 6. [How to run](#6-how-to-run)
 7. [API usage](#7-api-usage)
-8. [Limitations and next steps](#8-limitations-and-next-steps)
+8. [Kubernetes deployment (local cluster)](#8-kubernetes-deployment-local-cluster)
 
 ## 1. Problem description
 
@@ -106,10 +106,14 @@ midterm-project/
 ├── model.bin               # saved DictVectorizer + XGBoost model
 ├── Pipfile, Pipfile.lock   # pinned dependencies
 ├── Dockerfile
+├── kube-config/            # Kubernetes manifests
+│   ├── deployment.yaml
+│   └── service.yaml
+├── images/                 # screenshots used in this README
 └── README.md
 ```
 
-Architecture: `data/spotify-2023.csv` → `train.py` → `model.bin` → `predict.py` (Flask + gunicorn) → Docker container → `POST /predict`.
+Architecture: `data/spotify-2023.csv` → `train.py` → `model.bin` → `predict.py` (Flask + gunicorn) → Docker container → `POST /predict`. The same container image also runs on a local Kubernetes cluster (section 8).
 
 ## 6. How to run
 
@@ -121,22 +125,16 @@ git clone https://github.com/dynill/ML-zoomcamp.git
 cd ML-zoomcamp/midterm-project
 ```
 
-**Install dependencies and activate the environment** (Pipenv; exact versions are pinned in `Pipfile.lock`)
+**Install dependencies and activate the environment**
 ```bash
 pip install pipenv
 pipenv install
 pipenv shell
 ```
 
-**Train the model** (prints the test AUC and writes `model.bin`)
+**Train the model** 
 ```bash
 python train.py
-```
-Expected output:
-```
-rows after cleaning: 948, mega-hit share: 0.250
-test AUC: 0.8905
-model saved to model.bin
 ```
 
 **Run the service locally**
@@ -145,7 +143,7 @@ python predict.py
 ```
 The service listens on port 9696. (Without activating the environment, use `pipenv run python predict.py`.)
 
-**Run with Docker** (`model.bin` is included in the repo, so no training is needed)
+**Run with Docker** (`model.bin` is included in the repo)
 ```bash
 docker build -t mega-hit-prediction .
 docker run -it --rm -p 9696:9696 mega-hit-prediction
@@ -163,7 +161,7 @@ The first build takes a few minutes. The image uses `python:3.14-slim`, installs
 pipenv install --dev
 pipenv run jupyter notebook
 ```
-The notebook downloads the dataset with `kagglehub` (needs internet access) and takes several minutes to run; the random forest and XGBoost tuning loops are the slowest part.
+The notebook downloads the dataset with `kagglehub` and takes several minutes to run; the random forest and XGBoost tuning loops are the slowest part.
 
 ## 7. API usage
 
@@ -197,10 +195,54 @@ curl -X POST http://localhost:9696/predict \
 
 The same song released in March 2023 returns a probability of about 0.055 (`mega_hit: false`), which shows how strongly the model relies on release year. Missing fields, non-numeric values, or categories the model has not seen (for example `"key": "Db"` or `"released_month": 13`) return a `400` error with a message naming the problem.
 
-## 8. Limitations and next steps
+## 8. Kubernetes deployment (local cluster)
 
-- Selection bias: only songs that already reached the most-streamed list are included, so there are no flops to learn from.
-- The dataset is small (948 songs, 49 mega-hits in the test set), so scores are noisy and differences of a few AUC points are not meaningful.
-- Streams depend on marketing, artist fame, and playlist placement, none of which are in the features. Recent songs score low largely because they have not had time to accumulate streams.
-- Release year dominates, so the service is not a predictor of future hits. A fairer test would need songs of all levels of success, such as a larger Spotify tracks dataset.
-- The service is not deployed to the cloud; it runs locally and in Docker.
+The service is also deployed to a local Kubernetes cluster created with [kind](https://kind.sigs.k8s.io/). The manifests are in [`kube-config/`](kube-config/):
+
+- `deployment.yaml`: one pod running the `mega-hit-prediction:v001` image (port 9696, limits of 1 GiB memory and 0.5 CPU)
+- `service.yaml`: a `LoadBalancer` service that forwards port 80 to the pod's port 9696
+
+**Prerequisites:** Docker, [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation).
+
+```bash
+# create the cluster
+kind create cluster
+
+# build the image with an explicit tag (kind does not work with the default "latest" tag)
+docker build -t mega-hit-prediction:v001 .
+
+# load the image into the cluster
+kind load docker-image mega-hit-prediction:v001
+
+# deploy the pod and the service
+kubectl apply -f kube-config/deployment.yaml
+kubectl apply -f kube-config/service.yaml
+
+# check them
+kubectl get pod
+kubectl get service
+```
+
+Expected output (the pod should reach `Running`; on a local cluster the external IP of the service stays `<pending>`):
+
+![Pod and service](images/kubernetes-pod-service.png)
+
+**Test the service.** Forward a local port to the service and send the same request as in section 7 (port 8080 avoids needing `sudo`):
+```bash
+kubectl port-forward service/mega-hit 8080:80
+```
+In a second terminal:
+```bash
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/predict \
+  -H "Content-Type: application/json" \
+  -d '{"bpm": 120, "key": "C#", "mode": "Major", "danceability": 75, "valence": 60, "energy": 70, "acousticness": 15, "instrumentalness": 0, "liveness": 12, "speechiness": 6, "artist_count": 1, "released_month": 6, "released_year": 2012}'
+```
+The response is `{"mega_hit": true, "mega_hit_probability": 0.6299927234649658}`, the same value as when running locally and in Docker.
+
+![Prediction through the Kubernetes service](images/kubernetes-test.png)
+
+**Clean up:**
+```bash
+kind delete cluster
+```
